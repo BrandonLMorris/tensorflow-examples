@@ -2,7 +2,6 @@ from argparse import ArgumentParser
 import os
 
 import tensorflow as tf
-from tqdm import tqdm
 
 class SimpleModel(object):
     def __init__(self, sess, log=False):
@@ -12,8 +11,8 @@ class SimpleModel(object):
         self._define_placeholders()
         self._define_weights()
 
-        xentropy = tf.nn.softmax_cross_entropy_with_logits(labels=self.y,
-                                                           logits=self.forward(self.x))
+        xentropy = tf.nn.softmax_cross_entropy_with_logits_v2(
+                labels=self.y, logits=self.forward(self.x))
         self.loss = tf.reduce_mean(xentropy)
         self.accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.argmax(self.y, 1), tf.argmax(self.forward(self.x), 1)), tf.float32))
 
@@ -82,14 +81,29 @@ def main(argv):
     writer = tf.summary.FileWriter(f'{FLAGS.log_dir}/graph', graph=tf.get_default_graph())
     sess.run(tf.global_variables_initializer())
     saver = tf.train.Saver()
-    if not os.path.exists('/tmp/model.ckpt') or FLAGS.retrain:
+    # Retrain the model if we can't find the save or command line arg
+    if not FLAGS.retrain:
+        try:
+            saver.restore(sess, '/tmp/model.ckpt')
+        except tf.errors.NotFoundError:
+            FLAGS.retrain = True
+    if FLAGS.retrain:
         model.train()
         saver.save(sess, '/tmp/model.ckpt')
-    else:
-        saver.restore(sess, '/tmp/model.ckpt')
     print(f'Final test accuracy of {model.test() * 100 :.2f}')
     writer.close()
 
+    # Attack the model
+    adv_x = sess.run(fgsm(model), {model.x:mnist.test.images, model.y:mnist.test.labels})
+    adv_acc = sess.run(model.accuracy, {model.x:adv_x, model.y:mnist.test.labels})
+    print(f'Adversarial accuracy with strength eps={FLAGS.eps} = {adv_acc * 100:.2f}')
+
+
+def fgsm(model):
+    grad, = tf.gradients(model.loss, model.x)
+    grad_sign = tf.sign(grad)
+    adv_x = model.x + FLAGS.eps * grad_sign
+    return adv_x
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -99,6 +113,8 @@ if __name__ == '__main__':
                         help='Directory for the MNIST dataset')
     parser.add_argument('--log-dir', default='/tmp/tf-log/',
                         help='Directory for TensorBoard logs')
+    parser.add_argument('--eps', default=0.15, type=float,
+                        help='The epsilon strength of the FGSM attack')
     FLAGS, _ = parser.parse_known_args()
     mnist = tf.contrib.learn.datasets.mnist.read_data_sets(FLAGS.data_dir, one_hot=True)
     tf.app.run()
